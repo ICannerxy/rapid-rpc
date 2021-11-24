@@ -7,20 +7,14 @@ import io.netty.channel.ChannelOption;
 import io.netty.channel.EventLoopGroup;
 import io.netty.channel.nio.NioEventLoopGroup;
 import io.netty.channel.socket.nio.NioSocketChannel;
-import io.netty.util.concurrent.Future;
-import io.netty.util.concurrent.GenericFutureListener;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.collections4.CollectionUtils;
 
 import java.net.InetSocketAddress;
-import java.util.Arrays;
-import java.util.HashSet;
-import java.util.List;
-import java.util.Set;
-import java.util.concurrent.ArrayBlockingQueue;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ThreadPoolExecutor;
-import java.util.concurrent.TimeUnit;
+import java.util.*;
+import java.util.concurrent.*;
+import java.util.concurrent.locks.Condition;
+import java.util.concurrent.locks.ReentrantLock;
 
 /**
  * @author icanner
@@ -38,6 +32,13 @@ public class RpcConnectManager {
 
     /** 一个连接的地址，对应一个业务处理器*/
     private ConcurrentHashMap<InetSocketAddress, RpcClientHandler> connectHandleMap = new ConcurrentHashMap<>();
+
+    /** 所有连接成功的地址所对应的任务执行器列表*/
+    private CopyOnWriteArrayList<RpcClientHandler> connectHandleList = new CopyOnWriteArrayList<>();
+
+    private ReentrantLock connectLock = new ReentrantLock();
+
+    private Condition connectCondition = connectLock.newCondition();
 
     private EventLoopGroup eventLoopGroup = new NioEventLoopGroup(4);
 
@@ -64,6 +65,8 @@ public class RpcConnectManager {
         Set<InetSocketAddress> newAllServerNodeSet = new HashSet<>();
         if (CollectionUtils.isEmpty(allServerAddress)) {
             log.error("no available server address! ");
+            // 清除所有的连接信息
+            clearConnected();
         }
         for (String serverAddress : allServerAddress) {
             String[] addresses = serverAddress.split(":");
@@ -84,8 +87,36 @@ public class RpcConnectManager {
         }
 
         // 如果AllServerAddress里不存在的地址，需要进行删除
+        for (int i = connectHandleList.size() - 1; i >= 0; i--) {
+            RpcClientHandler rpcClientHandler = connectHandleList.get(i);
+            InetSocketAddress remotePeer = rpcClientHandler.getRemotePeer();
+            if (!newAllServerNodeSet.contains(remotePeer)) {
+                log.info("remove invalid server node :{}", remotePeer);
+                RpcClientHandler clientHandler = connectHandleMap.get(remotePeer);
+                if (clientHandler != null) {
+                    clientHandler.close();
+                    connectHandleMap.remove(remotePeer);
+                }
+                connectHandleList.remove(i);
+            }
+        }
 
 
+    }
+
+    public static void main(String[] args) {
+        List<Integer> list = new ArrayList<>();
+        list.add(1);
+        list.add(2);
+        list.add(3);
+        list.add(4);
+
+        for (int i = 0; i < list.size(); i++) {
+            Integer integer = list.get(i);
+            if (integer.equals(2) || integer.equals(3)) {
+                list.remove(integer);
+            }
+        }
     }
 
     /**
@@ -116,9 +147,53 @@ public class RpcConnectManager {
                 connect(bootstrap, remotePeer);
             }, 3, TimeUnit.SECONDS);
         });
+        // 处理成功连接情况
+        channelFuture.addListener(future -> {
+            if (future.isSuccess()) {
+                log.info("client channel connect {} success.", remotePeer);
+            }
+            addChannel(channelFuture.channel().pipeline().get(RpcClientHandler.class));
+        });
     }
 
+    /**
+     * 添加rpcClientHandler到指定缓存中
+     *
+     * @param rpcClientHandler
+     */
+    private void addChannel(RpcClientHandler rpcClientHandler) {
+        connectHandleMap.put(rpcClientHandler.getRemotePeer(), rpcClientHandler);
+        connectHandleList.add(rpcClientHandler);
+        // 唤醒可用的业务处理器
+        signalAvailableHandle();
+    }
+
+    /**
+     * 唤醒另一端阻塞的线程，有新的连接可用
+     */
+    private void signalAvailableHandle() {
+        connectLock.lock();
+        try {
+            connectCondition.signalAll();
+        } finally {
+            connectLock.unlock();
+        }
+    }
+
+    /**
+     * 清除所有连接
+     */
     private void clearConnected() {
+        for (RpcClientHandler rpcClientHandler : connectHandleList) {
+            InetSocketAddress remotePeer = rpcClientHandler.getRemotePeer();
+            RpcClientHandler handler = connectHandleMap.get(remotePeer);
+            if (null != handler) {
+                handler.close();
+                connectHandleMap.remove(remotePeer);
+            }
+        }
+        connectHandleList.clear();
+
     }
 
 
