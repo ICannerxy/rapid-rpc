@@ -13,6 +13,7 @@ import org.apache.commons.collections4.CollectionUtils;
 import java.net.InetSocketAddress;
 import java.util.*;
 import java.util.concurrent.*;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.locks.Condition;
 import java.util.concurrent.locks.ReentrantLock;
 
@@ -30,10 +31,14 @@ public class RpcConnectManager {
             TimeUnit.SECONDS, new ArrayBlockingQueue<Runnable>(65536));
 
 
-    /** 一个连接的地址，对应一个业务处理器*/
+    /**
+     * 一个连接的地址，对应一个业务处理器
+     */
     private ConcurrentHashMap<InetSocketAddress, RpcClientHandler> connectHandleMap = new ConcurrentHashMap<>();
 
-    /** 所有连接成功的地址所对应的任务执行器列表*/
+    /**
+     * 所有连接成功的地址所对应的任务执行器列表
+     */
     private CopyOnWriteArrayList<RpcClientHandler> connectHandleList = new CopyOnWriteArrayList<>();
 
     private ReentrantLock connectLock = new ReentrantLock();
@@ -41,6 +46,15 @@ public class RpcConnectManager {
     private Condition connectCondition = connectLock.newCondition();
 
     private EventLoopGroup eventLoopGroup = new NioEventLoopGroup(4);
+
+    /**
+     * 客户端获取连接超时时间
+     */
+    private long connectTimeoutMills = 6000;
+
+    private volatile boolean isRunning = true;
+
+    private volatile AtomicInteger handlerIdx = new AtomicInteger(0);
 
     private RpcConnectManager() {
 
@@ -58,7 +72,6 @@ public class RpcConnectManager {
     }
 
     /**
-     *
      * @param allServerAddress
      */
     private void updateConnectedServer(List<String> allServerAddress) {
@@ -102,21 +115,6 @@ public class RpcConnectManager {
         }
 
 
-    }
-
-    public static void main(String[] args) {
-        List<Integer> list = new ArrayList<>();
-        list.add(1);
-        list.add(2);
-        list.add(3);
-        list.add(4);
-
-        for (int i = 0; i < list.size(); i++) {
-            Integer integer = list.get(i);
-            if (integer.equals(2) || integer.equals(3)) {
-                list.remove(integer);
-            }
-        }
     }
 
     /**
@@ -165,13 +163,13 @@ public class RpcConnectManager {
         connectHandleMap.put(rpcClientHandler.getRemotePeer(), rpcClientHandler);
         connectHandleList.add(rpcClientHandler);
         // 唤醒可用的业务处理器
-        signalAvailableHandle();
+        signalAvailableHandler();
     }
 
     /**
      * 唤醒另一端阻塞的线程，有新的连接可用
      */
-    private void signalAvailableHandle() {
+    private void signalAvailableHandler() {
         connectLock.lock();
         try {
             connectCondition.signalAll();
@@ -194,6 +192,43 @@ public class RpcConnectManager {
         }
         connectHandleList.clear();
 
+    }
+
+    public boolean waitForAvailableHandler() throws InterruptedException {
+        connectLock.lock();
+        try {
+            return connectCondition.await(this.connectTimeoutMills, TimeUnit.MICROSECONDS);
+        } finally {
+            connectLock.unlock();
+        }
+    }
+
+    /**
+     * 选择一个连接处理器
+     *
+     * @return RpcClientHandler
+     */
+    public RpcClientHandler chooseHandler() {
+        CopyOnWriteArrayList<RpcClientHandler> clientHandlers = (CopyOnWriteArrayList<RpcClientHandler>) connectHandleList.clone();
+        int size = clientHandlers.size();
+        // 没有可用的连接处理器，需要等待连接
+        while (size == 0 && isRunning) {
+            try {
+                boolean hasAvailableHandler = waitForAvailableHandler();
+                if (hasAvailableHandler) {
+                    clientHandlers = (CopyOnWriteArrayList<RpcClientHandler>) connectHandleList.clone();
+                    size = clientHandlers.size();
+                }
+            } catch (InterruptedException e) {
+                log.error("wait for available handler failed, node is interrupted.");
+                throw new RuntimeException("no connect any servers! ", e);
+            }
+        }
+        if (!isRunning) {
+            return null;
+        }
+        int index = (handlerIdx.getAndIncrement() + size) % size;
+        return clientHandlers.get(index);
     }
 
 
