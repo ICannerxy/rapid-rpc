@@ -232,4 +232,26 @@ public class RpcConnectManager {
     }
 
 
+    /**
+     * 关闭连接
+     */
+    public void stop() {
+        for (RpcClientHandler rpcClientHandler : connectHandleList) {
+            rpcClientHandler.close();
+        }
+        // 唤醒正在等待获取连接的线程
+        signalAvailableHandler();
+        threadPoolExecutor.shutdown();
+        eventLoopGroup.shutdownGracefully();
+    }
+
+    public void reconnect(RpcClientHandler clientHandler, InetSocketAddress remotePeer) {
+        if (clientHandler != null) {
+            connectHandleList.remove(clientHandler);
+            connectHandleMap.remove(remotePeer);
+        }
+        // 重连
+        connectAsync(remotePeer);
+    }
+
 }
