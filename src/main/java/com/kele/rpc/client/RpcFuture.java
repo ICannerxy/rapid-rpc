@@ -3,17 +3,19 @@ package com.kele.rpc.client;
 import com.kele.rpc.codec.RpcRequest;
 import com.kele.rpc.codec.RpcResponse;
 import com.sun.corba.se.impl.orbutil.concurrent.Sync;
+import lombok.extern.slf4j.Slf4j;
 
-import java.util.concurrent.ExecutionException;
-import java.util.concurrent.Future;
-import java.util.concurrent.TimeUnit;
-import java.util.concurrent.TimeoutException;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.concurrent.*;
 import java.util.concurrent.locks.AbstractQueuedSynchronizer;
+import java.util.concurrent.locks.ReentrantLock;
 
 /**
  * @author icanner
  * @date 2021/11/28:10:11 下午
  */
+@Slf4j
 public class RpcFuture implements Future<Object> {
 
     private RpcRequest request;
@@ -23,6 +25,14 @@ public class RpcFuture implements Future<Object> {
     private long startTime;
 
     private Sync sync;
+
+    private static final long TIME_THRESHOLD = 5000;
+
+    private List<RpcCallback> pendingCallbacks = new ArrayList<>();
+
+    private ReentrantLock lock = new ReentrantLock();
+
+    private ThreadPoolExecutor threadPoolExecutor = new ThreadPoolExecutor(16, 16, 60, TimeUnit.SECONDS, new ArrayBlockingQueue<>(65536));
 
     public RpcFuture(RpcRequest request) {
         this.request = request;
@@ -41,13 +51,38 @@ public class RpcFuture implements Future<Object> {
         if (success) {
             invokeCallbacks();
         }
+        long costTime = System.currentTimeMillis() - startTime;
+        if (costTime > TIME_THRESHOLD) {
+            log.warn("the rpc response time is too slow, requestId: " + response.getRequestId() + " cost time: " + costTime);
+        }
     }
 
     /**
      * 执行回调
      */
     private void invokeCallbacks() {
+        lock.lock();
+        try {
+            for (final RpcCallback pendingCallback : pendingCallbacks) {
+                runCallback(pendingCallback);
+            }
+        } finally {
+            lock.unlock();
+        }
+
     }
+
+    private void runCallback(RpcCallback callback) {
+        final RpcResponse response = this.response;
+        threadPoolExecutor.submit(() -> {
+            if (response.getThrowable() == null) {
+                callback.success(response.getResult());
+            } else {
+                callback.failure(response.getThrowable());
+            }
+        });
+    }
+
 
     @Override
     public boolean cancel(boolean mayInterruptIfRunning) {
@@ -91,6 +126,20 @@ public class RpcFuture implements Future<Object> {
         }
     }
 
+    public RpcFuture addCallback(RpcCallback callback) {
+        lock.lock();
+        try {
+            if (isDone()) {
+                runCallback(callback);
+            } else {
+                pendingCallbacks.add(callback);
+            }
+        } finally {
+            lock.unlock();
+        }
+        return this;
+    }
+
     class Sync extends AbstractQueuedSynchronizer {
 
         private final int done = 1;
@@ -104,7 +153,7 @@ public class RpcFuture implements Future<Object> {
 
         @Override
         protected boolean tryRelease(int release) {
-            if (release == pending) {
+            if (getState() == pending) {
                 if (compareAndSetState(pending, done)) {
                     return true;
                 }
@@ -116,4 +165,6 @@ public class RpcFuture implements Future<Object> {
             return getState() == done;
         }
     }
+
+
 }

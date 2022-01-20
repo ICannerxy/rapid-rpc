@@ -47,8 +47,8 @@ public class RpcServer {
                 .childHandler(new ChannelInitializer<SocketChannel>() {
                     @Override
                     protected void initChannel(SocketChannel ch) throws Exception {
-                        ch.pipeline().addLast(new LengthFieldBasedFrameDecoder(65536, 0, 4, 0, 0));
-                        ch.pipeline().addLast(new RpcDecoder(RpcRequest.class))
+                        ch.pipeline().addLast(new LengthFieldBasedFrameDecoder(65536, 0, 4, 0, 0))
+                                .addLast(new RpcDecoder(RpcRequest.class))
                                 .addLast(new RpcEncoder(RpcResponse.class))
                                 .addLast(new RpcServerHandler(handlerMap));
                     }
@@ -58,12 +58,12 @@ public class RpcServer {
         int port = Integer.parseInt(array[1]);
         ChannelFuture channelFuture = bootstrap.bind(host, port).sync();
         channelFuture.addListener((ChannelFutureListener) future -> {
-           if (future.isSuccess()) {
+            if (future.isSuccess()) {
                 log.info("server success binding to " + serverAddress);
-           } else {
-               log.info("server fail binding to " + serverAddress);
-               throw new Exception("server start fail, cause: " + future.cause());
-           }
+            } else {
+                log.info("server fail binding to " + serverAddress);
+                throw new Exception("server start fail, cause: " + future.cause());
+            }
         });
 
         // 同步等待结果

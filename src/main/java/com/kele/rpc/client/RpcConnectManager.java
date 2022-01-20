@@ -160,7 +160,7 @@ public class RpcConnectManager {
      * @param rpcClientHandler
      */
     private void addChannel(RpcClientHandler rpcClientHandler) {
-        connectHandleMap.put(rpcClientHandler.getRemotePeer(), rpcClientHandler);
+        connectHandleMap.put((InetSocketAddress) rpcClientHandler.getChannel().remoteAddress(), rpcClientHandler);
         connectHandleList.add(rpcClientHandler);
         // 唤醒可用的业务处理器
         signalAvailableHandler();
